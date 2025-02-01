@@ -9,12 +9,13 @@ from dataclasses import dataclass
 @dataclass
 class GPTConfig:
     block_size: int = 1024
+    vocab_size: int = 50304
     n_embed: int = 768
     head_size: int = 64
-    n_layer: int =12
-    n_head: int = n_embed // head_size
-    bias: bool =False
-    dropout: float = 0
+    n_layer: int = 12
+    n_head: int = 12
+    bias: bool = False
+    dropout: float = 0.0
 
 
 
@@ -25,7 +26,7 @@ class CausalSelfAttention(nn.Module):
         self.key = nn.Linear(config.n_embed, config.head_size)
         self.query = nn.Linear(config.n_embed, config.head_size)
         self.value = nn.Linear(config.n_embed, config.head_size)
-        self.dropout = nn.Dropout(config.dropout)
+        self.dropout_p = config.dropout
 
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if (not self.flash):
@@ -41,11 +42,16 @@ class CausalSelfAttention(nn.Module):
         value = self.value(x)
 
         if self.flash:
-            out = torch.nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            out = torch.nn.functional.scaled_dot_product_attention(
+                query, key, value,
+                attn_mask=None,
+                dropout_p=self.dropout_p if self.training else 0.0,
+                is_causal=True
+            )
         else:
             weight = (query @ key.transpose(-2, -1)) 
             weight = weight.masked_fill(self.attention_mask[: seq_len, :seq_len] == 0, float('-inf'))
-            weight = F.softmax(weight, dim = -1)
+            weight = F.softmax(weight, dim=-1)
             weight = self.dropout(weight)
             out = weight @ value
         
@@ -70,7 +76,7 @@ class MultiheadAttention(nn.Module):
         return out
         
 
-class MLP(nn.Module,GPTConfig):
+class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.net = nn.Sequential(
@@ -85,7 +91,7 @@ class MLP(nn.Module,GPTConfig):
 
 
 
-class Block(nn.Module,GPTConfig):
+class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.attn = MultiheadAttention(config)
@@ -99,9 +105,11 @@ class Block(nn.Module,GPTConfig):
         return x
     
 
-class GPT(nn.Module,GPTConfig):
+class GPT(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.config = config  # 保存 config 对象
+        
         self.token_embedding_table = nn.Embedding(config.vocab_size, config.n_embed)
         self.position_embedding_table = nn.Embedding(config.block_size, config.n_embed)
         self.blocks = nn.Sequential(
@@ -144,7 +152,7 @@ class GPT(nn.Module,GPTConfig):
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
 
         for _ in range(max_new_tokens):
-            idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size:]
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] / temperature
 
@@ -172,10 +180,8 @@ class GPT(nn.Module,GPTConfig):
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         param_dict = {pn: p for pn, p in self.named_parameters()}
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-
-        decay_params = [p for n, p in param_dict.items() if p.dim >=2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim < 2]
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
