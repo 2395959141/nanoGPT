@@ -39,7 +39,7 @@ eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
-swan_log = False # disabled by default
+swan_log = True # disabled by default
 swan_project = 'gpt2-124M-chinese'
 swan_run_name = 'gpt2-124M-chinese' # 'run' + str(time.time())
 # data
