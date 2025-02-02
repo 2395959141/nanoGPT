@@ -15,6 +15,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123
 $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
 （如果您的集群没有Infiniband互连，请在前面加上NCCL_IB_DISABLE=1）
 """
+# * 全训练的话一共9719797213个token
 
 import os
 import time
@@ -30,23 +31,23 @@ from torch.utils.checkpoint import checkpoint
 from m_model import GPTConfig, GPT
 
 # 数据配置
-data_dir = '/home/gpt2_data_bin/'  # 直接使用绝对路径
+data_dir = '/root/autodl-tmp/mobile/processed_bins'  # 直接使用绝对路径
 
 
 out_dir = 'out'
 eval_interval = 1000  # 每2000步评估一次
 log_interval = 2   # 每2000步记录一次日志
-eval_iters = 64
+eval_iters = 200
 eval_only = False 
 always_save_checkpoint = True 
-init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+init_from = 'scratch'  # 强制设置为'scratch'
 # wandb logging
 swan_log = True # disabled by default
 swan_project = 'gpt2-124M-mobile'
 swan_run_name = 'gpt2-124M-mobile' # 'run' + str(time.time())
 # data
 gradient_accumulation_steps = 20# 梯度累积步数
-batch_size = 24  # 每个设备的训练批次大小
+batch_size = 20  # 每个设备的训练批次大小
 eval_batch_size = 16  # 评估时的批次大小
 block_size = 512
 # model
@@ -57,7 +58,7 @@ dropout = 0.1 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4  # 学习率
-max_iters = 8000  # 总训练迭代次数
+max_iters = 10000  # 总训练迭代次数
 weight_decay = 0.1
 beta1 = 0.9
 beta2 = 0.95
@@ -65,7 +66,7 @@ grad_clip = 1.0
 # learning rate decay settings
 decay_lr = True 
 warmup_iters = 2000  # 预热步数
-lr_decay_iters = 8000  # 学习率衰减的总步数
+lr_decay_iters = 10000  # 学习率衰减的总步数
 min_lr = 6e-5  # 最小学习率，约为初始学习率的1/10
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -123,7 +124,7 @@ if not os.path.exists(data_dir):
     raise FileNotFoundError(f"数据目录 {data_dir} 不存在！请检查路径设置")
     
 train_path = os.path.join(data_dir, 'train.bin')
-val_path = os.path.join(data_dir, 'test.bin')
+val_path = os.path.join(data_dir, 'val.bin')
 if not os.path.exists(train_path):
     raise FileNotFoundError(f"训练文件 {train_path} 不存在！请运行数据预处理脚本")
 if not os.path.exists(val_path):
@@ -152,8 +153,8 @@ def get_batch(split):
 iter_num = 0
 best_val_loss = 1e9
 
-# 直接设置vocab_size为21128
-meta_vocab_size = 21128
+# 直接设置vocab_size为50324
+meta_vocab_size = 50324
 
 # model init
 model_args = dict(n_layer=n_layer, 
@@ -161,7 +162,7 @@ model_args = dict(n_layer=n_layer,
                  n_embed=n_embd,
                  block_size=block_size,
                  bias=bias, 
-                 vocab_size=21128,  # 保持直接设置
+                 vocab_size=50324,  # 修改为50324
                  dropout=dropout)
 if init_from == 'scratch':
     print("Initializing a new model from scratch")
@@ -169,46 +170,46 @@ if init_from == 'scratch':
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
     print(f"初始化模型词汇表大小: {model.config.vocab_size}")
-elif init_from == 'resume':
-    # 优先尝试加载最佳检查点
-    ckpt_path = os.path.join(out_dir, 'best_ckpt.pt')
-    if not os.path.exists(ckpt_path):
-        # 如果最佳检查点不存在，加载最新的常规检查点
-        checkpoints = [f for f in os.listdir(out_dir) if f.startswith('ckpt_') and f.endswith('.pt')]
-        if checkpoints:
-            checkpoints.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
-            ckpt_path = os.path.join(out_dir, checkpoints[-1])
-    print(f"从 {ckpt_path} 恢复训练")
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    checkpoint_model_args = checkpoint['model_args']
-    # force these config attributes to be equal otherwise we can't even resume training
-    # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embed', 'block_size', 'bias']:
-        model_args[k] = checkpoint_model_args[k]
-    # create the model
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
-    state_dict = checkpoint['model']
-    # fix the keys of the state dictionary :(
-    # honestly no idea how checkpoints sometimes get this prefix, have to debug more
-    unwanted_prefix = '_orig_mod.'
-    for k,v in list(state_dict.items()):
-        if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
-    iter_num = checkpoint['iter_num']
-    best_val_loss = checkpoint['best_val_loss']
+# elif init_from == 'resume':
+#     # 优先尝试加载最佳检查点
+#     ckpt_path = os.path.join(out_dir, 'best_ckpt.pt')
+#     if not os.path.exists(ckpt_path):
+#         # 如果最佳检查点不存在，加载最新的常规检查点
+#         checkpoints = [f for f in os.listdir(out_dir) if f.startswith('ckpt_') and f.endswith('.pt')]
+#         if checkpoints:
+#             checkpoints.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
+#             ckpt_path = os.path.join(out_dir, checkpoints[-1])
+#     print(f"从 {ckpt_path} 恢复训练")
+#     checkpoint = torch.load(ckpt_path, map_location=device)
+#     checkpoint_model_args = checkpoint['model_args']
+#     # force these config attributes to be equal otherwise we can't even resume training
+#     # the rest of the attributes (e.g. dropout) can stay as desired from command line
+#     for k in ['n_layer', 'n_head', 'n_embed', 'block_size', 'bias']:
+#         model_args[k] = checkpoint_model_args[k]
+#     # create the model
+#     gptconf = GPTConfig(**model_args)
+#     model = GPT(gptconf)
+#     state_dict = checkpoint['model']
+#     # fix the keys of the state dictionary :(
+#     # honestly no idea how checkpoints sometimes get this prefix, have to debug more
+#     unwanted_prefix = '_orig_mod.'
+#     for k,v in list(state_dict.items()):
+#         if k.startswith(unwanted_prefix):
+#             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+#     model.load_state_dict(state_dict)
+#     iter_num = checkpoint['iter_num']
+#     best_val_loss = checkpoint['best_val_loss']
     
-    # 在模型加载后添加显存优化
-    model.to(device)
-    torch.cuda.empty_cache()
+#     # 在模型加载后添加显存优化
+#     model.to(device)
+#     torch.cuda.empty_cache()
     
-    # 分阶段释放内存
-    del state_dict
-    del checkpoint_model_args
-    _ = gc.collect()
-    torch.cuda.empty_cache()
-    print(f"从检查点恢复模型，词汇表大小: {model.config.vocab_size}")
+#     # 分阶段释放内存
+#     del state_dict
+#     del checkpoint_model_args
+#     _ = gc.collect()
+#     torch.cuda.empty_cache()
+#     print(f"从检查点恢复模型，词汇表大小: {model.config.vocab_size}")
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
@@ -227,13 +228,13 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # compile the model
-# if compile:
-#     print("compiling the model... (takes a ~minute)")
-#     unoptimized_model = model
-#     # 添加动态形状配置
-#     torch._dynamo.config.dynamic_shapes = True
-#     torch._dynamo.config.assume_static_by_default = False
-#     model = torch.compile(model, dynamic=True)
+if compile:
+    print("compiling the model... (takes a ~minute)")
+    unoptimized_model = model
+    # 添加动态形状配置
+    torch._dynamo.config.dynamic_shapes = False
+    torch._dynamo.config.assume_static_by_default = False
+    model = torch.compile(model, mode="reduce-overhead",dynamic=False)
 
 # 添加优化器初始化
 # 创建AdamW优化器
@@ -253,7 +254,7 @@ if ddp:
 def estimate_loss():
     out = {}
     model.eval()
-    for split in ['train', 'test']:
+    for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
@@ -314,47 +315,46 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['test']:.4f}")
+        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if swan_log:
             swanlab.log({
                 "iter": iter_num,
                 "train/loss": losses['train'],
-                "val/loss": losses['test'],
+                "val/loss": losses['val'],
                 "lr": lr,
-                #"mfu": running_mfu*100, # convert to percentage
             })
-        if losses['test'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['test']
-            if iter_num > 0:
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
-                }
-                
-                # 保存常规检查点（带迭代编号）
-                checkpoint_name = f'ckpt_{iter_num}.pt'
-                checkpoint_path = os.path.join(out_dir, checkpoint_name)
-                print(f"保存检查点到 {checkpoint_path}")
-                torch.save(checkpoint, checkpoint_path)
-                
-                # 始终保存最佳检查点（单独文件）
-                if losses['test'] == best_val_loss:
-                    best_checkpoint_path = os.path.join(out_dir, 'best_ckpt.pt')
-                    torch.save(checkpoint, best_checkpoint_path)
-                
-                # 清理旧检查点（保留最近max_checkpoints个 + 最佳检查点）
-                checkpoints = [f for f in os.listdir(out_dir) if f.startswith('ckpt_') and f.endswith('.pt')]
-                checkpoints = sorted(checkpoints, key=lambda x: int(x.split('_')[1].split('.')[0]))
-                
-                # 删除超出数量的旧检查点
-                while len(checkpoints) > max_checkpoints:
-                    oldest = checkpoints.pop(0)
-                    os.remove(os.path.join(out_dir, oldest))
-                    print(f"删除旧检查点: {oldest}")
+        # 无论损失是否改善都保存检查点
+        checkpoint = {
+            'model': raw_model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'model_args': model_args,
+            'iter_num': iter_num,
+            'best_val_loss': best_val_loss,
+            'config': config,
+        }
+        
+        # 保存常规检查点（带迭代编号）
+        checkpoint_name = f'ckpt_{iter_num}.pt'
+        checkpoint_path = os.path.join(out_dir, checkpoint_name)
+        print(f"保存检查点到 {checkpoint_path}")
+        torch.save(checkpoint, checkpoint_path)
+        
+        # 如果当前是最佳结果，额外保存最佳检查点
+        if losses['val'] < best_val_loss:
+            best_val_loss = losses['val']
+            best_checkpoint_path = os.path.join(out_dir, 'best_ckpt.pt')
+            torch.save(checkpoint, best_checkpoint_path)
+            print(f"更新最佳检查点: {best_checkpoint_path}")
+        
+        # 清理旧检查点（保留最近max_checkpoints个 + 最佳检查点）
+        checkpoints = [f for f in os.listdir(out_dir) if f.startswith('ckpt_') and f.endswith('.pt')]
+        checkpoints = sorted(checkpoints, key=lambda x: int(x.split('_')[1].split('.')[0]))
+        
+        # 删除超出数量的旧检查点
+        while len(checkpoints) > max_checkpoints:
+            oldest = checkpoints.pop(0)
+            os.remove(os.path.join(out_dir, oldest))
+            print(f"删除旧检查点: {oldest}")
     if iter_num == 0 and eval_only:
         break
 

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 @dataclass
 class GPTConfig:
     block_size: int = 1024
-    vocab_size: int = 21128
+    vocab_size: int = 50324
     n_embed: int = 768
     head_size: int = 64
     n_layer: int = 12
@@ -82,8 +82,9 @@ class MLP(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(config.n_embed, 4 * config.n_embed),
             nn.GELU(),
+            nn.Dropout(0.2),
             nn.Linear(4 * config.n_embed, config.n_embed),
-            nn.Dropout(config.dropout)
+            nn.Dropout(0.2)
         )
 
     def forward(self, x):
