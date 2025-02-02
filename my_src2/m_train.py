@@ -30,27 +30,28 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from torch.utils.checkpoint import checkpoint
 
-from model import GPTConfig, GPT
+from m_model import GPTConfig, GPT
 
-data_dir = '/openbayes/home/nanoGPT/data/seq_monkey/seq_monkey'
+# 数据配置
+data_dir = '/home/gpt2_data_bin/'  # 直接使用绝对路径
+
 
 out_dir = 'out'
 eval_interval = 2000  # 每2000步评估一次
-log_interval = 2   # 每2000步记录一次日志
+log_interval = 50   # 每2000步记录一次日志
 eval_iters = 200
 eval_only = False 
 always_save_checkpoint = True 
-init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
+init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 swan_log = True # disabled by default
-swan_project = 'gpt2-124M-chinese'
-swan_run_name = 'gpt2-124M-chinese' # 'run' + str(time.time())
+swan_project = 'gpt2-124M-chinese-news'
+swan_run_name = 'gpt2-124M-chinese-news' # 'run' + str(time.time())
 # data
-dataset = '/openbayes/home/nanoGPT/data/seq_monkey/seq_monkey'
 gradient_accumulation_steps = 8  # 梯度累积步数
-batch_size = 20  # 每个设备的训练批次大小
+batch_size = 24  # 每个设备的训练批次大小
 eval_batch_size = 16  # 评估时的批次大小
-block_size = 1024
+block_size = 512
 # model
 n_layer = 12
 n_head = 12
@@ -59,7 +60,7 @@ dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 5e-4  # 学习率
-max_iters = 600000  # 总训练迭代次数
+max_iters = 3384  # 总训练迭代次数
 weight_decay = 0.1
 beta1 = 0.9
 beta2 = 0.95
@@ -67,18 +68,20 @@ grad_clip = 1.0
 # learning rate decay settings
 decay_lr = True 
 warmup_iters = 1000  # 预热步数
-lr_decay_iters = 10000  # 学习率衰减的总步数
+lr_decay_iters = 3384  # 学习率衰减的总步数
 min_lr = 5e-5  # 最小学习率，约为初始学习率的1/10
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_bf16_supported() else 'float16'
-compile = True # use PyTorch 2.0 to compile the model to be faster
+# 添加版本检查
+import sys
+compile = False if sys.version_info >= (3, 12) else True  # 自动禁用3.12+的编译
 
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read())
+# exec(open('configurator.py').read())
 config = {k: globals()[k] for k in config_keys}
 # -----------------------------------------------------------------------------
 
@@ -118,6 +121,16 @@ ptdtype = {'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = torch.amp.autocast(device_type='cuda', dtype=ptdtype)
 # ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
+# 检查路径是否存在
+if not os.path.exists(data_dir):
+    raise FileNotFoundError(f"数据目录 {data_dir} 不存在！请检查路径设置")
+    
+train_path = os.path.join(data_dir, 'train.bin')
+val_path = os.path.join(data_dir, 'test.bin')
+if not os.path.exists(train_path):
+    raise FileNotFoundError(f"训练文件 {train_path} 不存在！请运行数据预处理脚本")
+if not os.path.exists(val_path):
+    raise FileNotFoundError(f"验证文件 {val_path} 不存在！请运行数据预处理脚本")
 
 def get_batch(split):
     # 添加文件路径定义
@@ -142,39 +155,38 @@ def get_batch(split):
 iter_num = 0
 best_val_loss = 1e9
 
-# attempt to derive vocab_size from the dataset
-meta_path = os.path.join(data_dir, 'meta.pkl')
-meta_vocab_size = None
-if os.path.exists(meta_path):
-    with open(meta_path, 'rb') as f:
-        meta = pickle.load(f)
-    meta_vocab_size = meta['vocab_size']
-    print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+# 直接设置vocab_size为21128
+meta_vocab_size = 21128
 
 # model init
 model_args = dict(n_layer=n_layer, 
                  n_head=n_head, 
-                 n_embed=n_embd,  # 改为正确的参数名
+                 n_embed=n_embd,
                  block_size=block_size,
                  bias=bias, 
-                 vocab_size=None, 
+                 vocab_size=21128,  # 保持直接设置
                  dropout=dropout)
 if init_from == 'scratch':
     print("Initializing a new model from scratch")
-    if meta_vocab_size is None:
-        print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
-    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
+    model_args['vocab_size'] = meta_vocab_size
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
+    print(f"初始化模型词汇表大小: {model.config.vocab_size}")
 elif init_from == 'resume':
-    print(f"Resuming training from {out_dir}")
-    # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    # 优先尝试加载最佳检查点
+    ckpt_path = os.path.join(out_dir, 'best_ckpt.pt')
+    if not os.path.exists(ckpt_path):
+        # 如果最佳检查点不存在，加载最新的常规检查点
+        checkpoints = [f for f in os.listdir(out_dir) if f.startswith('ckpt_') and f.endswith('.pt')]
+        if checkpoints:
+            checkpoints.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
+            ckpt_path = os.path.join(out_dir, checkpoints[-1])
+    print(f"从 {ckpt_path} 恢复训练")
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embed', 'block_size', 'bias', 'vocab_size']:
+    for k in ['n_layer', 'n_head', 'n_embed', 'block_size', 'bias']:
         model_args[k] = checkpoint_model_args[k]
     # create the model
     gptconf = GPTConfig(**model_args)
@@ -199,6 +211,7 @@ elif init_from == 'resume':
     del checkpoint_model_args
     _ = gc.collect()
     torch.cuda.empty_cache()
+    print(f"从检查点恢复模型，词汇表大小: {model.config.vocab_size}")
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
@@ -217,13 +230,13 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # compile the model
-if compile:
-    print("compiling the model... (takes a ~minute)")
-    unoptimized_model = model
-    # 添加动态形状配置
-    torch._dynamo.config.dynamic_shapes = True
-    torch._dynamo.config.assume_static_by_default = False
-    model = torch.compile(model, dynamic=True)
+# if compile:
+#     print("compiling the model... (takes a ~minute)")
+#     unoptimized_model = model
+#     # 添加动态形状配置
+#     torch._dynamo.config.dynamic_shapes = True
+#     torch._dynamo.config.assume_static_by_default = False
+#     model = torch.compile(model, dynamic=True)
 
 # 添加优化器初始化
 # 创建AdamW优化器
@@ -243,7 +256,7 @@ if ddp:
 def estimate_loss():
     out = {}
     model.eval()
-    for split in ['train', 'val']:
+    for split in ['train', 'test']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
@@ -290,6 +303,9 @@ def print_memory_stats():
         print(f"保留缓存: {stats['reserved_bytes.all.current']/1024**3:.2f}GB")
         print(f"活跃内存: {stats['active_bytes.all.current']/1024**3:.2f}GB")
 
+# 在系统设置部分添加检查点保存数量限制
+max_checkpoints = 10  # 最大保存的检查点数量
+
 # ! 训练循环
 while True:
 
@@ -301,17 +317,17 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['test']:.4f}")
         if swan_log:
             swanlab.log({
                 "iter": iter_num,
                 "train/loss": losses['train'],
-                "val/loss": losses['val'],
+                "val/loss": losses['test'],
                 "lr": lr,
                 #"mfu": running_mfu*100, # convert to percentage
             })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
+        if losses['test'] < best_val_loss or always_save_checkpoint:
+            best_val_loss = losses['test']
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
@@ -321,8 +337,27 @@ while True:
                     'best_val_loss': best_val_loss,
                     'config': config,
                 }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                
+                # 保存常规检查点（带迭代编号）
+                checkpoint_name = f'ckpt_{iter_num}.pt'
+                checkpoint_path = os.path.join(out_dir, checkpoint_name)
+                print(f"保存检查点到 {checkpoint_path}")
+                torch.save(checkpoint, checkpoint_path)
+                
+                # 始终保存最佳检查点（单独文件）
+                if losses['test'] == best_val_loss:
+                    best_checkpoint_path = os.path.join(out_dir, 'best_ckpt.pt')
+                    torch.save(checkpoint, best_checkpoint_path)
+                
+                # 清理旧检查点（保留最近max_checkpoints个 + 最佳检查点）
+                checkpoints = [f for f in os.listdir(out_dir) if f.startswith('ckpt_') and f.endswith('.pt')]
+                checkpoints = sorted(checkpoints, key=lambda x: int(x.split('_')[1].split('.')[0]))
+                
+                # 删除超出数量的旧检查点
+                while len(checkpoints) > max_checkpoints:
+                    oldest = checkpoints.pop(0)
+                    os.remove(os.path.join(out_dir, oldest))
+                    print(f"删除旧检查点: {oldest}")
     if iter_num == 0 and eval_only:
         break
 

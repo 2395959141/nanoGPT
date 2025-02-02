@@ -67,7 +67,7 @@ for split in ["train", "test"]:
     
     print(f"创建内存映射文件: {split}.bin")
     arr = np.memmap(os.path.join(output_dir, f'{split}.bin'), 
-                   dtype=np.int32, mode='w+', shape=(total_len,))
+                   dtype=np.uint16, mode='w+', shape=(total_len,))
     
     idx = 0
     for sample in tqdm(tokenized_datasets[split], desc=f'写入{split}数据'):
