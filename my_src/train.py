@@ -22,22 +22,25 @@ import math
 import pickle
 from contextlib import nullcontext
 
+
+import gc
 import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+from torch.utils.checkpoint import checkpoint
 
 from model import GPTConfig, GPT
 
 data_dir = '/openbayes/home/nanoGPT/data/seq_monkey/seq_monkey'
 
 out_dir = 'out'
-eval_interval = 2000
-log_interval = 2000
+eval_interval = 1000
+log_interval = 2
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
-init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 swan_log = True # disabled by default
 swan_project = 'gpt2-124M-chinese'
@@ -63,14 +66,13 @@ grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 2000 # how many steps to warm up for
-lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
+lr_decay_iters = 10000 # should be ~= max_iters per Chinchilla
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-dtype = 'bfloat16' 
-# dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+dtype = 'bfloat16' if torch.cuda.is_bf16_supported() else 'float16'
 compile = True # use PyTorch 2.0 to compile the model to be faster
 
 # -----------------------------------------------------------------------------
@@ -112,7 +114,7 @@ device_type = 'cuda'
 # note: float16 data type will automatically use a GradScaler
 ptdtype = {'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 # ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
-ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+ctx = torch.amp.autocast(device_type='cuda', dtype=ptdtype)
 # ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
 
@@ -186,6 +188,16 @@ elif init_from == 'resume':
     model.load_state_dict(state_dict)
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
+    
+    # 在模型加载后添加显存优化
+    model.to(device)
+    torch.cuda.empty_cache()
+    
+    # 分阶段释放内存
+    del state_dict
+    del checkpoint_model_args
+    _ = gc.collect()
+    torch.cuda.empty_cache()
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
@@ -203,17 +215,23 @@ model.to(device)
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
-# optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
-if init_from == 'resume':
-    optimizer.load_state_dict(checkpoint['optimizer'])
-checkpoint = None # free up memory
-
 # compile the model
 if compile:
     print("compiling the model... (takes a ~minute)")
     unoptimized_model = model
-    model = torch.compile(model) # requires PyTorch 2.0
+    # 添加动态形状配置
+    torch._dynamo.config.dynamic_shapes = True
+    torch._dynamo.config.assume_static_by_default = False
+    model = torch.compile(model, dynamic=True)
+
+# 添加优化器初始化
+# 创建AdamW优化器
+optimizer = torch.optim.AdamW(
+    model.parameters(),
+    lr=learning_rate,
+    betas=(beta1, beta2),
+    weight_decay=weight_decay
+)
 
 # wrap model into DDP container
 if ddp:
@@ -263,6 +281,15 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
+
+def print_memory_stats():
+    if torch.cuda.is_available():
+        stats = torch.cuda.memory_stats()
+        print(f"已分配: {stats['allocated_bytes.all.current']/1024**3:.2f}GB")
+        print(f"保留缓存: {stats['reserved_bytes.all.current']/1024**3:.2f}GB")
+        print(f"活跃内存: {stats['active_bytes.all.current']/1024**3:.2f}GB")
+
+# ! 训练循环
 while True:
 
     # determine and set the learning rate for this iteration
@@ -336,6 +363,16 @@ while True:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        
+        # 每2个batch更新swanlab
+        if swan_log:
+            swanlab.log({
+                "iter": iter_num,
+                "train/loss": lossf,
+                "lr": lr,
+                "mfu": running_mfu*100,
+            })
+
     iter_num += 1
     local_iter_num += 1
 

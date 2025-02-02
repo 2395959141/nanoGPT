@@ -204,11 +204,12 @@ class GPT(nn.Module):
         """ 估计模型flops利用率（MFU），单位为4090的 bfloat16峰值flops """
         N = self.get_num_params()
         cfg = self.config
-        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
+        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embed//cfg.n_head, cfg.block_size
         flops_per_token = 6*N + 12*L*H*Q*T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         flops_achieved = flops_per_iter * (1.0/dt)
-        flops_promised = 312e12
+        flops_promised = 165.2e12  # RTX 4090的BF16理论峰值性能：165.2 TFLOPS
+        
         mfu = flops_achieved / flops_promised
-        return mfu
+        return mfu 
