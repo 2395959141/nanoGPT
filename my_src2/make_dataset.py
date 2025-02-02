@@ -19,8 +19,15 @@ print("正在扫描数据文件...")
 all_file_list = glob("/root/autodl-fs/gpt2_data/*/**")
 print(f"总共发现文件数量: {len(all_file_list)}")
 
-test_file_list = random.sample(all_file_list, 50)
-train_file_list = [file for file in all_file_list if file not in test_file_list]
+# 修改开始：先打乱整个文件列表
+print("打乱文件顺序...")
+random.shuffle(all_file_list)  # 原地打乱文件顺序
+
+# 划分训练集和测试集（假设仍要50个测试文件）
+test_file_list = all_file_list[:50]  # 取前50个作为测试集
+train_file_list = all_file_list[50:]  # 剩余作为训练集
+# 修改结束
+
 print(f"数据集划分完成:")
 print(f"训练集数量: {len(train_file_list)}, 测试集数量: {len(test_file_list)}")
 
@@ -47,14 +54,23 @@ def process(example):
     return {"ids": encoded["input_ids"], "len": len(encoded["input_ids"])}
 
 print("开始tokenize数据...")
+# 首先进行tokenize处理
 tokenized_datasets = raw_dataset.map(
     process,
     remove_columns=raw_dataset["train"].column_names,
-    batched=False,  # 改为非批处理模式
-    num_proc=8,     # 增加并行处理
-    desc="Tokenizing"  # 添加进度描述
+    batched=False,
+    num_proc=8,
+    desc="Tokenizing"
 )
-print("tokenize完成")
+
+# 对每个数据集分别进行shuffle
+print("打乱数据集...")
+shuffled_datasets = DatasetDict({
+    split: tokenized_datasets[split].shuffle(seed=42)
+    for split in tokenized_datasets.keys()
+})
+
+print("tokenize和shuffle完成")
 
 output_dir = "./gpt2_data_bin"
 os.makedirs(output_dir, exist_ok=True)
@@ -62,7 +78,7 @@ print(f"输出目录创建完成: {output_dir}")
 
 for split in ["train", "test"]:
     print(f"\n处理{split}数据集...")
-    total_len = sum(tokenized_datasets[split]['len'])
+    total_len = sum(shuffled_datasets[split]['len'])
     print(f"{split}数据集总token数: {total_len}")
     
     print(f"创建内存映射文件: {split}.bin")
@@ -70,7 +86,7 @@ for split in ["train", "test"]:
                    dtype=np.uint16, mode='w+', shape=(total_len,))
     
     idx = 0
-    for sample in tqdm(tokenized_datasets[split], desc=f'写入{split}数据'):
+    for sample in tqdm(shuffled_datasets[split], desc=f'写入{split}数据'):
         arr[idx : idx + len(sample['ids'])] = sample['ids']
         idx += len(sample['ids'])
     arr.flush()
