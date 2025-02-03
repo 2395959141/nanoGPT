@@ -32,6 +32,12 @@ from torch.utils.checkpoint import checkpoint
 
 from m_model import GPTConfig, GPT
 
+# 新增导入
+from transformers import Trainer, TrainingArguments
+from transformers.trainer_pt_utils import get_parameter_names
+from torch.optim import AdamW
+from trainer.data_utils import get_dataloaders
+
 # 数据配置
 dataset = 'chinese_seq'  # 添加数据集标识
 data_dir = os.environ.get('DATA_DIR', '/home/gpt2_data_bin/')  # 允许通过环境变量覆盖数据路径
@@ -133,25 +139,6 @@ if not os.path.exists(train_path):
     raise FileNotFoundError(f"训练文件 {train_path} 不存在！请运行数据预处理脚本")
 if not os.path.exists(val_path):
     raise FileNotFoundError(f"验证文件 {val_path} 不存在！请运行数据预处理脚本")
-
-def get_batch(split):
-    # 添加文件路径定义
-    file_path = os.path.join(data_dir, f'{split}.bin')  # 假设数据文件名为 train.bin 和 val.bin
-    # We recreate np.memmap every batch to avoid a memory leak, as per
-    # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
-    if split == 'train':
-        data = np.memmap(file_path, dtype=np.uint16, mode='r')
-    else:
-        data = np.memmap(file_path, dtype=np.uint16, mode='r')
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
-    if device_type == 'cuda':
-        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
-    else:
-        x, y = x.to(device), y.to(device)
-    return x, y
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -428,6 +415,106 @@ while True:
 
 if ddp:
     destroy_process_group()
+                    
+# 初始化Hugging Face Trainer
+def setup_trainer(model, train_loader, val_loader):
+    # 训练参数配置
+    training_args = TrainingArguments(
+        output_dir=out_dir,
+        evaluation_strategy="steps",
+        eval_steps=eval_interval,
+        logging_steps=log_interval,
+        save_steps=eval_interval,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        adam_beta1=beta1,
+        adam_beta2=beta2,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=eval_batch_size,
+        max_steps=max_iters,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        warmup_steps=warmup_iters,
+        lr_scheduler_type="cosine",
+        fp16=(dtype == 'float16'),
+        bf16=(dtype == 'bfloat16'),
+        dataloader_num_workers=4,
+        gradient_clipping=grad_clip,
+        report_to="none",  # 我们后面会自定义swanlab的回调
+        ddp_find_unused_parameters=False,
+        remove_unused_columns=False,
+    )
+
+    # 自定义优化器
+    decay_parameters = get_parameter_names(model, [torch.nn.LayerNorm])
+    decay_parameters = [name for name in decay_parameters if "bias" not in name]
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters() if n in decay_parameters],
+            "weight_decay": weight_decay,
+        },
+        {
+            "params": [p for n, p in model.named_parameters() if n not in decay_parameters],
+            "weight_decay": 0.0,
+        },
+    ]
+    optimizer = AdamW(
+        optimizer_grouped_parameters,
+        lr=learning_rate,
+        betas=(beta1, beta2),
+    )
+
+    # 创建Trainer实例
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_loader.dataset,
+        eval_dataset=val_loader.dataset,
+        optimizers=(optimizer, None),  # 使用自定义优化器
+        data_collator=lambda data: {
+            'input_ids': torch.stack([d['input_ids'] for d in data]),
+            'labels': torch.stack([d['labels'] for d in data])
+        }
+    )
+    
+    # 添加swanlab回调
+    if swan_log and master_process:
+        from transformers import TrainerCallback
+        class SwanLabCallback(TrainerCallback):
+            def on_log(self, args, state, control, logs=None, **kwargs):
+                if logs:
+                    swanlab.log({
+                        "train/loss": logs.get('loss', None),
+                        "eval/loss": logs.get('eval_loss', None),
+                        "lr": logs.get('learning_rate', None),
+                    })
+        
+        trainer.add_callback(SwanLabCallback())
+    
+    return trainer
+
+# 修改后的主执行流程
+if __name__ == "__main__":
+    # 初始化DDP
+    if ddp:
+        init_process_group(backend=backend)
+        torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
+    
+    # 获取数据加载器
+    train_loader, val_loader = get_dataloaders(
+        block_size=block_size,
+        batch_size=batch_size,
+        data_dir=data_dir
+    )
+    
+    # 初始化模型（保持原有模型初始化代码不变）
+    # ... [原有模型初始化代码] ...
+    
+    # 创建Trainer并开始训练
+    trainer = setup_trainer(model, train_loader, val_loader)
+    trainer.train()
+    
+    if ddp:
+        destroy_process_group()
                     
 
 

@@ -4,19 +4,23 @@ import inspect
 import torch.nn as nn
 from torch.nn import functional as F
 from dataclasses import dataclass
+from transformers import PreTrainedModel, PretrainedConfig
 
 
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 21128
-    n_embed: int = 768
-    head_size: int = 64
-    n_layer: int = 12
-    n_head: int = 12
-    bias: bool = False
-    dropout: float = 0.0
-
+class GPTConfig(PretrainedConfig):
+    def __init__(
+        self,
+        n_layer=12,
+        n_head=12,
+        n_embd=768,
+        block_size=512,
+        **kwargs
+    ):
+        self.n_layer = n_layer
+        self.n_head = n_head
+        self.n_embd = n_embd
+        self.block_size = block_size
+        super().__init__(**kwargs)
 
 
 class CausalSelfAttention(nn.Module):
@@ -105,9 +109,11 @@ class Block(nn.Module):
         return x
     
 
-class GPT(nn.Module):
+class GPT(PreTrainedModel):
+    config_class = GPTConfig  # 需要定义config_class
+    
     def __init__(self, config):
-        super().__init__()
+        super().__init__(config)
         self.config = config  # 保存 config 对象
         
         self.token_embedding_table = nn.Embedding(config.vocab_size, config.n_embed)
