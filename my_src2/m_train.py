@@ -37,18 +37,18 @@ data_dir = '/home/gpt2_data_bin/'  # 直接使用绝对路径
 
 
 out_dir = 'out'
-eval_interval = 2000  # 每2000步评估一次
-log_interval = 50   # 每2000步记录一次日志
-eval_iters = 200
+eval_interval = 1000  # 每2000步评估一次
+log_interval = 1   # 每2000步记录一次日志
+eval_iters = 64
 eval_only = False 
 always_save_checkpoint = True 
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 swan_log = True # disabled by default
-swan_project = 'gpt2-124M-chinese-news'
-swan_run_name = 'gpt2-124M-chinese-news' # 'run' + str(time.time())
+swan_project = 'gpt2-124M-chinese-seq_monkey'
+swan_run_name = 'gpt2-124M-chinese-seq_monkey' # 'run' + str(time.time())
 # data
-gradient_accumulation_steps = 8  # 梯度累积步数
+gradient_accumulation_steps = 32  # 梯度累积步数
 batch_size = 24  # 每个设备的训练批次大小
 eval_batch_size = 16  # 评估时的批次大小
 block_size = 512
@@ -56,19 +56,19 @@ block_size = 512
 n_layer = 12
 n_head = 12
 n_embd = 768
-dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
+dropout = 0.1 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
-learning_rate = 5e-4  # 学习率
-max_iters = 3384  # 总训练迭代次数
+learning_rate = 5e-5  # 学习率
+max_iters = 10000  # 总训练迭代次数
 weight_decay = 0.1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0 
 # learning rate decay settings
 decay_lr = True 
-warmup_iters = 1000  # 预热步数
-lr_decay_iters = 3384  # 学习率衰减的总步数
+warmup_iters = 2500  # 预热步数
+lr_decay_iters = 10000  # 学习率衰减的总步数
 min_lr = 5e-5  # 最小学习率，约为初始学习率的1/10
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -406,7 +406,7 @@ while True:
                 "iter": iter_num,
                 "train/loss": lossf,
                 "lr": lr,
-                "mfu": running_mfu*100,
+                "mfu": running_mfu*100*4,
             })
 
     iter_num += 1

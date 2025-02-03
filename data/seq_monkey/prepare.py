@@ -13,7 +13,18 @@ from datasets import load_dataset # huggingface datasets
 
 # 配置参数
 num_proc = 8  # 并行处理进程数
-enc = tiktoken.get_encoding("p50k_base")   # *使用GPT3编码器
+enc = tiktoken.get_encoding("gpt2")   # *使用GPT3编码器
+
+# 修改输出目录为绝对路径
+output_dir = '/root/autodl-tmp/bin_data'
+os.makedirs(output_dir, exist_ok=True)
+train_bin_path = os.path.join(output_dir, 'train.bin')
+val_bin_path = os.path.join(output_dir, 'val.bin')
+
+
+# 新增：保存原始数据集到指定路径
+dataset_save_path = '/root/autodl-fs/data'
+os.makedirs(dataset_save_path, exist_ok=True)
 
 if __name__ == '__main__':
     # 1. 加载数据集
@@ -22,14 +33,17 @@ if __name__ == '__main__':
     try:
         dataset = load_dataset('json', 
                               data_files={
-                                  'train': '/openbayes/input/input0/fixed_corpus.jsonl'
+                                  'train': '/root/autodl-fs/mobvoi_seq_monkey_general_open_corpus.jsonl'
                               },
-                              split='train')
+                              split='train[:60%]')
         
+        dataset.save_to_disk(dataset_save_path)
+        print(f"原始数据集已保存到：{dataset_save_path}")
+
         # 直接对dataset进行划分，因为它已经是一个Dataset对象
-        print("正在从数据集划分5%作为验证集...")
+        print("正在从数据集划分0.05%作为验证集...")
         split_dataset = dataset.train_test_split(
-            test_size=0.05,  # 5%作为验证集
+            test_size=0.0005,  # 5%作为验证集
             seed=2023,
             shuffle=True
         )
@@ -62,23 +76,29 @@ if __name__ == '__main__':
         )
 
     # 5. 保存为二进制文件
-    output_dir = os.path.join(os.path.dirname(__file__), 'seq_monkey')
-    os.makedirs(output_dir, exist_ok=True)
-
     for split, dset in tokenized.items():
-        filename = os.path.join(output_dir, f'{split}.bin')
         # 计算总长度
-        total_len = sum(dset['len'])
-        print(f"{split}数据集总token数: {total_len}")
+        arr_len = np.sum(dset['len'], dtype=np.uint64)
+        # 根据split选择对应的文件路径
+        filename = train_bin_path if split == 'train' else val_bin_path
+        print(f"{split}数据集总token数: {arr_len}")
+        print(f"保存路径: {filename}")
         
-        # 创建memmap时指定shape
-        arr = np.memmap(filename, dtype=np.uint16, mode='w+', shape=(total_len,))
+        # 创建memmap
+        dtype = np.uint16
+        arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
         
-        # 写入数据
+        # 使用分批写入
+        total_batches = 1024  # 总批次数
         idx = 0
-        for sample in tqdm(dset, desc=f'写入 {filename}'):
-            arr[idx : idx + len(sample['ids'])] = sample['ids']
-            idx += len(sample['ids'])
+        for batch_idx in tqdm(range(total_batches), desc=f'写入 {filename}'):
+            # 将数据集分片处理
+            batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
+            # 将批次的ids连接起来
+            arr_batch = np.concatenate(batch['ids'])
+            # 写入memmap
+            arr[idx : idx + len(arr_batch)] = arr_batch
+            idx += len(arr_batch)
         
         # 确保数据写入磁盘
         arr.flush()
