@@ -20,16 +20,17 @@ class GPTConfig(PretrainedConfig):
         self.n_head = n_head
         self.n_embd = n_embd
         self.block_size = block_size
+        self.head_size = n_embd // n_head  # 添加这一行
         super().__init__(**kwargs)
 
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
-        assert config.n_embed % config.n_head == 0
-        self.key = nn.Linear(config.n_embed, config.head_size)
-        self.query = nn.Linear(config.n_embed, config.head_size)
-        self.value = nn.Linear(config.n_embed, config.head_size)
+        head_size = config.n_embed // config.n_head  # 动态计算head_size
+        self.key = nn.Linear(config.n_embed, head_size)
+        self.query = nn.Linear(config.n_embed, head_size)
+        self.value = nn.Linear(config.n_embed, head_size)
         self.dropout_p = config.dropout
 
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
@@ -215,7 +216,7 @@ class GPT(PreTrainedModel):
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         flops_achieved = flops_per_iter * (1.0/dt)
-        flops_promised = 165.2e12  # RTX 4090的BF16理论峰值性能：165.2 TFLOPS
+        flops_promised = 165.2e12 * 2  # RTX 4090的BF16理论峰值性能：165.2 TFLOPS
         
         mfu = flops_achieved / flops_promised
         return mfu 

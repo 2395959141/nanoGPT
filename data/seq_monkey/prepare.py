@@ -18,7 +18,7 @@ import gc
 # 修改数据集缓存路径到有空间的磁盘
 os.environ["HF_DATASETS_CACHE"] = "/root/autodl-fs/data/seq_monkey"  # 新路径
 
-
+# ! 总Token数量：2,734,775,146 tokens
 
 # 配置参数
 num_proc = 1 # 并行处理进程数

@@ -15,7 +15,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123
 $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
 （如果您的集群没有Infiniband互连，请在前面加上NCCL_IB_DISABLE=1）
 """
-
+# ! 总Token数量：2,734,775,146 tokens [使用seq_monkey数据集]
 import os
 import time
 import math
@@ -34,7 +34,7 @@ from m_model import GPTConfig, GPT
 
 # 数据配置
 dataset = 'chinese_seq'  # 添加数据集标识
-data_dir = os.environ.get('DATA_DIR', '/home/gpt2_data_bin/')  # 允许通过环境变量覆盖数据路径
+data_dir = os.environ.get('DATA_DIR', '/root/autodl-tmp/bin_data')  # 允许通过环境变量覆盖数据路径
 tokenizer_path = "/root/autodl-fs/huggingface/transformers/bert_base_chinese_tokenizer"  # 添加本地tokenizer路径
 
 
@@ -50,9 +50,9 @@ swan_log = True # disabled by default
 swan_project = 'gpt2-124M-chinese-seq_monkey'
 swan_run_name = 'gpt2-124M-chinese-seq_monkey' # 'run' + str(time.time())
 # data
-gradient_accumulation_steps = 32  # 梯度累积步数
-batch_size = 24  # 每个设备的训练批次大小
-eval_batch_size = 16  # 评估时的批次大小
+gradient_accumulation_steps = 16  # 梯度累积步数
+batch_size = 40  # 每个设备的训练批次大小
+eval_batch_size = 64  # 评估时的批次大小
 block_size = 512
 # model
 n_layer = 12
@@ -61,8 +61,8 @@ n_embd = 768
 dropout = 0.1 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
-learning_rate = 5e-5  # 学习率
-max_iters = 10000  # 总训练迭代次数
+learning_rate = 6e-4  # 学习率
+max_iters = 22000  # 总训练迭代次数
 weight_decay = 0.1
 beta1 = 0.9
 beta2 = 0.95
@@ -70,8 +70,8 @@ grad_clip = 1.0
 # learning rate decay settings
 decay_lr = True 
 warmup_iters = 2500  # 预热步数
-lr_decay_iters = 10000  # 学习率衰减的总步数
-min_lr = 5e-5  # 最小学习率，约为初始学习率的1/10
+lr_decay_iters = 22000  # 学习率衰减的总步数
+min_lr = 6e-5  # 最小学习率，约为初始学习率的1/10
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
@@ -128,7 +128,7 @@ if not os.path.exists(data_dir):
     raise FileNotFoundError(f"数据目录 {data_dir} 不存在！请检查路径设置")
     
 train_path = os.path.join(data_dir, 'train.bin')
-val_path = os.path.join(data_dir, 'test.bin')
+val_path = os.path.join(data_dir, 'val.bin')  # 已经是val.bin
 if not os.path.exists(train_path):
     raise FileNotFoundError(f"训练文件 {train_path} 不存在！请运行数据预处理脚本")
 if not os.path.exists(val_path):
@@ -136,7 +136,7 @@ if not os.path.exists(val_path):
 
 def get_batch(split):
     # 添加文件路径定义
-    file_path = os.path.join(data_dir, f'{split}.bin')  # 假设数据文件名为 train.bin 和 val.bin
+    file_path = os.path.join(data_dir, f'{split}.bin')  # 已经使用split参数，会自动选择val.bin
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
@@ -174,53 +174,53 @@ if init_from == 'scratch':
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
     print(f"初始化模型词汇表大小: {model.config.vocab_size}")
-elif init_from == 'resume':
-    # 优先尝试加载最佳检查点
-    ckpt_path = os.path.join(out_dir, 'best_ckpt.pt')
-    if not os.path.exists(ckpt_path):
-        # 如果最佳检查点不存在，加载最新的常规检查点
-        checkpoints = [f for f in os.listdir(out_dir) if f.startswith('ckpt_') and f.endswith('.pt')]
-        if checkpoints:
-            checkpoints.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
-            ckpt_path = os.path.join(out_dir, checkpoints[-1])
-    print(f"从 {ckpt_path} 恢复训练")
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    # 添加优化器状态恢复
+# elif init_from == 'resume':
+#     # 优先尝试加载最佳检查点
+#     ckpt_path = os.path.join(out_dir, 'best_ckpt.pt')
+#     if not os.path.exists(ckpt_path):
+#         # 如果最佳检查点不存在，加载最新的常规检查点
+#         checkpoints = [f for f in os.listdir(out_dir) if f.startswith('ckpt_') and f.endswith('.pt')]
+#         if checkpoints:
+#             checkpoints.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
+#             ckpt_path = os.path.join(out_dir, checkpoints[-1])
+#     print(f"从 {ckpt_path} 恢复训练")
+#     checkpoint = torch.load(ckpt_path, map_location=device)
+#     # 添加优化器状态恢复
 
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
-    if 'optimizer' in checkpoint:
-        optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
-        optimizer.load_state_dict(checkpoint['optimizer'])
-    checkpoint_model_args = checkpoint['model_args']
-    # force these config attributes to be equal otherwise we can't even resume training
-    # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embed', 'block_size', 'bias']:
-        model_args[k] = checkpoint_model_args[k]
-    # create the model
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
-    state_dict = checkpoint['model']
-    # fix the keys of the state dictionary :(
-    # honestly no idea how checkpoints sometimes get this prefix, have to debug more
-    unwanted_prefix = '_orig_mod.'
-    for k,v in list(state_dict.items()):
-        if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
-    iter_num = checkpoint['iter_num']
-    best_val_loss = checkpoint['best_val_loss']
+#     gptconf = GPTConfig(**model_args)
+#     model = GPT(gptconf)
+#     if 'optimizer' in checkpoint:
+#         optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+#         optimizer.load_state_dict(checkpoint['optimizer'])
+#     checkpoint_model_args = checkpoint['model_args']
+#     # force these config attributes to be equal otherwise we can't even resume training
+#     # the rest of the attributes (e.g. dropout) can stay as desired from command line
+#     for k in ['n_layer', 'n_head', 'n_embed', 'block_size', 'bias']:
+#         model_args[k] = checkpoint_model_args[k]
+#     # create the model
+#     gptconf = GPTConfig(**model_args)
+#     model = GPT(gptconf)
+#     state_dict = checkpoint['model']
+#     # fix the keys of the state dictionary :(
+#     # honestly no idea how checkpoints sometimes get this prefix, have to debug more
+#     unwanted_prefix = '_orig_mod.'
+#     for k,v in list(state_dict.items()):
+#         if k.startswith(unwanted_prefix):
+#             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+#     model.load_state_dict(state_dict)
+#     iter_num = checkpoint['iter_num']
+#     best_val_loss = checkpoint['best_val_loss']
     
-    # 在模型加载后添加显存优化
-    model.to(device)
-    torch.cuda.empty_cache()
+#     # 在模型加载后添加显存优化
+#     model.to(device)
+#     torch.cuda.empty_cache()
     
-    # 分阶段释放内存
-    del state_dict
-    del checkpoint_model_args
-    _ = gc.collect()
-    torch.cuda.empty_cache()
-    print(f"从检查点恢复模型，词汇表大小: {model.config.vocab_size}")
+#     # 分阶段释放内存
+#     del state_dict
+#     del checkpoint_model_args
+#     _ = gc.collect()
+#     torch.cuda.empty_cache()
+#     print(f"从检查点恢复模型，词汇表大小: {model.config.vocab_size}")
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
@@ -242,9 +242,10 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 if compile and sys.version_info < (3, 12):
     print("compiling the model... (takes a ~minute)")
     # 添加动态形状配置
-    torch._dynamo.config.dynamic_shapes = True
+    torch._dynamo.config.dynamic_shapes = False
     torch._dynamo.config.assume_static_by_default = False
-    model = torch.compile(model, dynamic=True)
+    torch._dynamo.config.suppress_errors = True
+    model = torch.compile(model, dynamic=False)
 
 # 添加优化器初始化
 # 创建AdamW优化器
